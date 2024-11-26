@@ -1,77 +1,99 @@
-//! Blinks the LED on a Pico board
+//! This example shows how to use SPI (Serial Peripheral Interface) in the RP2040 chip.
 //!
-//! This will blink an LED attached to GP25, which is the pin the Pico uses for the on-board LED.
+//! Example written for a display using the ST7789 chip. Possibly the Waveshare Pico-ResTouch
+//! (https://www.waveshare.com/wiki/Pico-ResTouch-LCD-2.8)
+
 #![no_std]
 #![no_main]
 
-use bsp::entry;
+use core::cell::RefCell;
+
 use defmt::*;
-use defmt_rtt as _;
-use embedded_hal::digital::OutputPin;
-use panic_probe as _;
+use display_interface_spi::SPIInterface;
+use embassy_embedded_hal::shared_bus::blocking::spi::SpiDeviceWithConfig;
+use embassy_executor::Spawner;
+use embassy_rp::gpio::{Level, Output};
+use embassy_rp::spi;
+use embassy_rp::spi::Spi;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_time::Delay;
+use embedded_graphics::image::{Image, ImageRawLE};
+use embedded_graphics::mono_font::ascii::FONT_10X20;
+use embedded_graphics::mono_font::MonoTextStyle;
+use embedded_graphics::pixelcolor::Rgb565;
+use embedded_graphics::prelude::*;
+use embedded_graphics::text::Text;
+use mipidsi::models::ST7789;
+use mipidsi::options::{Orientation, Rotation};
+use mipidsi::Builder;
+use {defmt_rtt as _, panic_probe as _};
 
-// Provide an alias for our BSP so we can switch targets quickly.
-// Uncomment the BSP you included in Cargo.toml, the rest of the code does not need to change.
-use rp_pico as bsp;
-// use sparkfun_pro_micro_rp2040 as bsp;
+const DISPLAY_FREQ: u32 = 64_000_000;
 
-use bsp::hal::{
-    clocks::{init_clocks_and_plls, Clock},
-    pac,
-    sio::Sio,
-    watchdog::Watchdog,
-};
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p = embassy_rp::init(Default::default());
+    info!("Hello World!");
 
-#[entry]
-fn main() -> ! {
-    info!("Program start");
-    let mut pac = pac::Peripherals::take().unwrap();
-    let core = pac::CorePeripherals::take().unwrap();
-    let mut watchdog = Watchdog::new(pac.WATCHDOG);
-    let sio = Sio::new(pac.SIO);
+    let bl = p.PIN_25;
+    let rst = p.PIN_12;
+    let display_cs = p.PIN_9;
+    let dcx = p.PIN_8;
+    let mosi = p.PIN_11;
+    let clk = p.PIN_10;
 
-    // External high-speed crystal on the pico board is 12Mhz
-    let external_xtal_freq_hz = 12_000_000u32;
-    let clocks = init_clocks_and_plls(
-        external_xtal_freq_hz,
-        pac.XOSC,
-        pac.CLOCKS,
-        pac.PLL_SYS,
-        pac.PLL_USB,
-        &mut pac.RESETS,
-        &mut watchdog,
-    )
-    .ok()
-    .unwrap();
+    // create SPI
+    let mut display_config = spi::Config::default();
+    display_config.frequency = DISPLAY_FREQ;
+    display_config.phase = spi::Phase::CaptureOnSecondTransition;
+    display_config.polarity = spi::Polarity::IdleHigh;
 
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
+    let spi = Spi::new_blocking_txonly(p.SPI1, clk, mosi, display_config.clone());
+    let spi_bus: Mutex<NoopRawMutex, _> = Mutex::new(RefCell::new(spi));
 
-    let pins = bsp::Pins::new(
-        pac.IO_BANK0,
-        pac.PADS_BANK0,
-        sio.gpio_bank0,
-        &mut pac.RESETS,
+    let display_spi = SpiDeviceWithConfig::new(
+        &spi_bus,
+        Output::new(display_cs, Level::High),
+        display_config,
     );
 
-    // This is the correct pin on the Raspberry Pico board. On other boards, even if they have an
-    // on-board LED, it might need to be changed.
-    //
-    // Notably, on the Pico W, the LED is not connected to any of the RP2040 GPIOs but to the cyw43 module instead.
-    // One way to do that is by using [embassy](https://github.com/embassy-rs/embassy/blob/main/examples/rp/src/bin/wifi_blinky.rs)
-    //
-    // If you have a Pico W and want to toggle a LED with a simple GPIO output pin, you can connect an external
-    // LED to one of the GPIO pins, and reference that pin here. Don't forget adding an appropriate resistor
-    // in series with the LED.
-    let mut led_pin = pins.led.into_push_pull_output();
+    let dcx = Output::new(dcx, Level::Low);
+    let rst = Output::new(rst, Level::Low);
+    // dcx: 0 = command, 1 = data
 
-    loop {
-        info!("on!");
-        led_pin.set_high().unwrap();
-        delay.delay_ms(500);
-        info!("off!");
-        led_pin.set_low().unwrap();
-        delay.delay_ms(500);
-    }
+    // Enable LCD backlight
+    let _bl = Output::new(bl, Level::High);
+
+    // display interface abstraction from SPI and DC
+    let di = SPIInterface::new(display_spi, dcx);
+
+    // Define the display from the display interface and initialize it
+    let mut display = Builder::new(ST7789, di)
+        .display_size(135, 240)
+        .orientation(Orientation::new().rotate(Rotation::Deg270))
+        .invert_colors(mipidsi::options::ColorInversion::Inverted)
+        .reset_pin(rst)
+        .display_offset(50, 40)
+        //        .orientation(Orientation::new().rotate(Rotation::Deg270))
+        .init(&mut Delay)
+        .unwrap();
+    display.clear(Rgb565::BLUE).unwrap();
+
+    let raw_image_data = ImageRawLE::new(include_bytes!("../assets/ferris.raw"), 86);
+    let ferris = Image::new(&raw_image_data, Point::new(34, 68));
+
+    // Display the image
+    ferris.draw(&mut display).unwrap();
+
+    let style = MonoTextStyle::new(&FONT_10X20, Rgb565::GREEN);
+    Text::new(
+        "Hello embedded_graphics \n + embassy + RP2040!",
+        Point::new(0, 30),
+        style,
+    )
+    .draw(&mut display)
+    .unwrap();
+
+    loop {}
 }
-
-// End of file
