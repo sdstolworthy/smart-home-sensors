@@ -1,23 +1,22 @@
-//! This example shows how to use SPI (Serial Peripheral Interface) in the RP2040 chip.
-//!
-//! Example written for a display using the ST7789 chip. Possibly the Waveshare Pico-ResTouch
-//! (https://www.waveshare.com/wiki/Pico-ResTouch-LCD-2.8)
-
 #![no_std]
 #![no_main]
 
 use core::cell::RefCell;
 
 use defmt::*;
+use dht20::dht20::{initialize, read_temperature_and_humidity};
+use dht20::Irqs;
 use display_interface_spi::SPIInterface;
 use embassy_embedded_hal::shared_bus::blocking::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Level, Output};
+use embassy_rp::i2c::{self, Config};
 use embassy_rp::spi;
 use embassy_rp::spi::Spi;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_time::Delay;
+use embassy_time::Timer;
 use embedded_graphics::image::{Image, ImageRawLE};
 use embedded_graphics::mono_font::ascii::FONT_10X20;
 use embedded_graphics::mono_font::MonoTextStyle;
@@ -28,6 +27,8 @@ use mipidsi::models::ST7789;
 use mipidsi::options::{Orientation, Rotation};
 use mipidsi::Builder;
 use {defmt_rtt as _, panic_probe as _};
+
+mod dht20;
 
 const DISPLAY_FREQ: u32 = 64_000_000;
 
@@ -78,7 +79,7 @@ async fn main(_spawner: Spawner) {
         //        .orientation(Orientation::new().rotate(Rotation::Deg270))
         .init(&mut Delay)
         .unwrap();
-    display.clear(Rgb565::BLUE).unwrap();
+    display.clear(Rgb565::RED).unwrap();
 
     let raw_image_data = ImageRawLE::new(include_bytes!("../assets/ferris.raw"), 86);
     let ferris = Image::new(&raw_image_data, Point::new(34, 68));
@@ -86,14 +87,23 @@ async fn main(_spawner: Spawner) {
     // Display the image
     ferris.draw(&mut display).unwrap();
 
-    let style = MonoTextStyle::new(&FONT_10X20, Rgb565::GREEN);
-    Text::new(
-        "Hello embedded_graphics \n + embassy + RP2040!",
-        Point::new(0, 30),
-        style,
-    )
-    .draw(&mut display)
-    .unwrap();
+    let style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
+    let sda = p.PIN_28;
+    let scl = p.PIN_29;
 
-    loop {}
+    let mut i2c = i2c::I2c::new_async(p.I2C0, scl, sda, Irqs, Config::default());
+    let _ready = initialize(&mut i2c).await;
+    loop {
+        let _ = display.clear(Rgb565::BLACK).unwrap();
+        Text::new("Temperature:", Point::new(0, 20), style)
+            .draw(&mut display)
+            .unwrap();
+        let (temperature, _humidity) = read_temperature_and_humidity(&mut i2c).await;
+        let mut buffer = itoa::Buffer::new();
+        let temperature = buffer.format(temperature as i64);
+        Text::new(temperature, Point::new(0, 40), style)
+            .draw(&mut display)
+            .unwrap();
+        Timer::after_millis(1000).await;
+    }
 }

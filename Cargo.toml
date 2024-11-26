@@ -24,6 +24,8 @@ embassy-rp = { version = "0.2.0", features = ["defmt", "unstable-pac", "time-dri
 embassy-futures = { version = "0.1.0"}
 embedded-graphics = "0.8.1"
 mipidsi = "0.8.0"
+embedded-hal-async = "1.0.0"
+itoa = "1.0.14"
 
 # but you can use any BSP. Uncomment this to use the pro_micro_rp2040 BSP instead
 # sparkfun-pro-micro-rp2040 = "0.8"
