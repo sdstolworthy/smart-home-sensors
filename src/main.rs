@@ -4,15 +4,15 @@
 use core::cell::RefCell;
 
 use defmt::*;
-use dht20::dht20::{initialize, read_temperature_and_humidity};
-use dht20::Irqs;
 use display_interface_spi::SPIInterface;
 use embassy_embedded_hal::shared_bus::blocking::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
+use embassy_rp::adc::{Adc, Config as AdcConfig};
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::i2c::{self, Config};
-use embassy_rp::spi;
+use embassy_rp::i2c::{self, Config as I2cConfig};
+use embassy_rp::peripherals::I2C0;
 use embassy_rp::spi::Spi;
+use embassy_rp::{bind_interrupts, spi};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_time::Delay;
@@ -26,10 +26,18 @@ use embedded_graphics::text::Text;
 use mipidsi::models::ST7789;
 use mipidsi::options::{Orientation, Rotation};
 use mipidsi::Builder;
+use water_sensor::WaterSensor;
 use {defmt_rtt as _, panic_probe as _};
 
 mod dht20;
+mod water_sensor;
 
+bind_interrupts!(pub struct AdcIrqs {
+    ADC_IRQ_FIFO => embassy_rp::adc::InterruptHandler;
+});
+bind_interrupts!(pub struct I2cIrqs {
+    I2C0_IRQ => embassy_rp::i2c::InterruptHandler<I2C0>;
+});
 const DISPLAY_FREQ: u32 = 64_000_000;
 
 #[embassy_executor::main]
@@ -91,19 +99,29 @@ async fn main(_spawner: Spawner) {
     let sda = p.PIN_28;
     let scl = p.PIN_29;
 
-    let mut i2c = i2c::I2c::new_async(p.I2C0, scl, sda, Irqs, Config::default());
-    let _ready = initialize(&mut i2c).await;
+    let mut i2c = i2c::I2c::new_async(p.I2C0, scl, sda, I2cIrqs, I2cConfig::default());
+    let mut reader = dht20::I2CTemperatureReader::initialize(&mut i2c)
+        .await
+        .unwrap();
+
+    let mut adc = Adc::new(p.ADC, AdcIrqs, AdcConfig::default());
+    let mut water_sensor = WaterSensor::initialize(adc);
+
     loop {
-        let _ = display.clear(Rgb565::BLACK).unwrap();
-        Text::new("Temperature:", Point::new(0, 20), style)
-            .draw(&mut display)
-            .unwrap();
-        let (temperature, _humidity) = read_temperature_and_humidity(&mut i2c).await;
-        let mut buffer = itoa::Buffer::new();
-        let temperature = buffer.format(temperature as i64);
-        Text::new(temperature, Point::new(0, 40), style)
-            .draw(&mut display)
-            .unwrap();
+        let _ = display.clear(Rgb565::BLACK);
+        let _ = Text::new("Temperature:", Point::new(0, 20), style).draw(&mut display);
+        let _ = Text::new("Humidity:", Point::new(0, 80), style).draw(&mut display);
+        if let Ok(reading) = reader.read_temperature_and_humidity().await {
+            let mut celsius_buffer = itoa::Buffer::new();
+            let celsius = celsius_buffer.format(reading.celsius() as i64);
+            let mut fahrenheit_buffer = itoa::Buffer::new();
+            let fahrenheit = fahrenheit_buffer.format(reading.fahrenheit() as i64);
+            let mut humidity_buffer = itoa::Buffer::new();
+            let humidity = humidity_buffer.format(reading.humidity() as i64);
+            let _ = Text::new(celsius, Point::new(0, 40), style).draw(&mut display);
+            let _ = Text::new(fahrenheit, Point::new(0, 60), style).draw(&mut display);
+            let _ = Text::new(humidity, Point::new(0, 100), style).draw(&mut display);
+        }
         Timer::after_millis(1000).await;
     }
 }
